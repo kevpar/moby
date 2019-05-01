@@ -1,6 +1,6 @@
 //+build windows
 
-package windows // import "github.com/docker/docker/daemon/graphdriver/windows"
+package windows // import "github.com/docker/docker/daemon/graphdriver/windows/filter"
 
 import (
 	"bufio"
