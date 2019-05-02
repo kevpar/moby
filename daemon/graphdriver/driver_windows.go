@@ -2,7 +2,7 @@ package graphdriver // import "github.com/docker/docker/daemon/graphdriver"
 
 var (
 	// List of drivers that should be used in order
-	priority = "windowsfilter"
+	priority = "cimfs"
 )
 
 // GetFSMagic returns the filesystem id given the path.

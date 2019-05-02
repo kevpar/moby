@@ -842,7 +842,7 @@ func NewDaemon(ctx context.Context, config *config.Config, pluginStore *plugin.S
 	d.graphDrivers = make(map[string]string)
 	layerStores := make(map[string]layer.Store)
 	if runtime.GOOS == "windows" {
-		d.graphDrivers[runtime.GOOS] = "windowsfilter"
+		d.graphDrivers[runtime.GOOS] = "cimfs"
 		if system.LCOWSupported() {
 			d.graphDrivers["linux"] = "lcow"
 		}

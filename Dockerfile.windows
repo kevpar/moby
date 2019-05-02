@@ -170,7 +170,7 @@ SHELL ["powershell", "-Command", "$ErrorActionPreference = 'Stop'; $ProgressPref
 #  - FROM_DOCKERFILE is used for detection of building within a container.
 ENV GO_VERSION=1.12.3 `
     GIT_VERSION=2.11.1 `
-    GOPATH=C:\go `
+    GOPATH=C:\gopath `
     FROM_DOCKERFILE=1
 
 RUN `
@@ -254,10 +254,4 @@ RUN `
   Write-Host INFO: Completed
 
 # Make PowerShell the default entrypoint
-ENTRYPOINT ["powershell.exe"]
-
-# Set the working directory to the location of the sources
-WORKDIR C:\go\src\github.com\docker\docker
-
-# Copy the sources into the container
-COPY . .
+ENTRYPOINT ["cmd.exe"]
