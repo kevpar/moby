@@ -289,6 +289,8 @@ func (c *client) createWindows(id string, spec *specs.Spec, runtimeOptions inter
 		})
 	}
 
+	logrus.WithField("layers", configuration.Layers).Info("Container layerPath")
+
 	// Add the mounts (volumes, bind mounts etc) to the structure
 	var mds []hcsshim.MappedDir
 	var mps []hcsshim.MappedPipe

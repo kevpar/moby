@@ -4,10 +4,10 @@ package cimfs //import "github.com/docker/docker/daemon/graphdriver/windows/cimf
 
 import (
 	"archive/tar"
-	"bytes"
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/json"
+	"fmt"
 	"io"
 	"io/ioutil"
 	"os"
@@ -35,7 +35,7 @@ func init() {
 	graphdriver.Register("cimfs", InitDriver)
 }
 
-func InitDriver(root string, options []string, uidMaps, gidMaps []idtools.IDMap) (graphdriver.Driver, error) {
+func InitDriver(root string, options []string, uidMaps []idtools.IDMap, gidMaps []idtools.IDMap) (graphdriver.Driver, error) {
 	logrus.Info("cimfs.InitDriver")
 
 	layersRoot := filepath.Join(root, "layers")
@@ -51,6 +51,11 @@ func InitDriver(root string, options []string, uidMaps, gidMaps []idtools.IDMap)
 		layersRoot: layersRoot,
 		mountsRoot: mountsRoot,
 	}, nil
+}
+
+type mountInfo struct {
+	Path     string
+	RefCount uint
 }
 
 type Driver struct {
@@ -126,7 +131,7 @@ func createVhdx(path string, sizeGB uint32) error {
 		return errors.Wrap(err, "failed to create VHD")
 	}
 
-	vhd, err := vhd.OpenVirtualDisk(path, vhd.VirtualDiskAccessAll, vhd.OpenVirtualDiskFlagNone)
+	vhd, err := vhd.OpenVirtualDisk(path, vhd.VirtualDiskAccessNone, vhd.OpenVirtualDiskFlagNone)
 	if err != nil {
 		return errors.Wrap(err, "failed to open VHD")
 	}
@@ -134,6 +139,7 @@ func createVhdx(path string, sizeGB uint32) error {
 	if err := hcsFormatWritableLayerVhd(uintptr(vhd)); err != nil {
 		return errors.Wrap(err, "failed to format VHD")
 	}
+	logrus.WithField("path", path).Info("Successfully formatted VHD")
 
 	if err := windows.CloseHandle(windows.Handle(vhd)); err != nil {
 		return errors.Wrap(err, "failed to close VHD")
@@ -142,26 +148,35 @@ func createVhdx(path string, sizeGB uint32) error {
 	return nil
 }
 
-func (d *Driver) CreateReadWrite(id, parent string, opts *graphdriver.CreateOpts) error {
+func (d *Driver) CreateReadWrite(id string, parent string, opts *graphdriver.CreateOpts) (err error) {
 	logrus.WithFields(logrus.Fields{
 		"id":     id,
 		"parent": parent,
 	}).Info("cimfs.Driver.CreateReadWrite")
+	defer func() {
+		logrus.WithField("error", err).Info("cimfs.Driver.CreateReadWrite end")
+	}()
 
-	idtools.MkdirAllAndChown(d.layerDirPath(id), 0700, idtools.Identity{})
-	createVhdx(d.layerScratchPath(id), 20)
+	if err := idtools.MkdirAllAndChown(d.layerDirPath(id), 0700, idtools.Identity{}); err != nil {
+		return errors.Wrap(err, "failed to create layer dir path")
+	}
+	if err := createVhdx(d.layerScratchPath(id), 20); err != nil {
+		return errors.Wrap(err, "failed to create VHD")
+	}
 	// TODO: resize scratch vhd
 
 	return d.updateLayerChain(id, parent)
 }
 
-func (d *Driver) Create(id, parent string, opts *graphdriver.CreateOpts) error {
+func (d *Driver) Create(id string, parent string, opts *graphdriver.CreateOpts) error {
 	logrus.WithFields(logrus.Fields{
 		"id":     id,
 		"parent": parent,
 	}).Info("cimfs.Driver.Create")
 
-	idtools.MkdirAllAndChown(d.layerDirPath(id), 0700, idtools.Identity{})
+	if err := idtools.MkdirAllAndChown(d.layerDirPath(id), 0700, idtools.Identity{}); err != nil {
+		return errors.Wrap(err, "failed to create layer dir path")
+	}
 
 	return d.updateLayerChain(id, parent)
 }
@@ -173,11 +188,20 @@ func (d *Driver) Remove(id string) error {
 	return nil
 }
 
-func (d *Driver) Get(id, mountLabel string) (fs containerfs.ContainerFS, err error) {
+func (d *Driver) Get(id string, mountLabel string) (fs containerfs.ContainerFS, err error) {
 	logrus.WithFields(logrus.Fields{
 		"id":         id,
 		"mountLabel": mountLabel,
 	}).Info("cimfs.Driver.Get")
+	defer func() {
+		logrus.WithField("error", err).Info("cimfs.Driver.Get end")
+	}()
+
+	if mountPath, mounted, err := d.getCacheMount(id); mounted {
+		return containerfs.NewLocalContainerFS(mountPath), nil
+	} else if err != nil {
+		return nil, errors.Wrap(err, "failed to check first layer mount cache")
+	}
 
 	layerChain, err := d.getLayerChain(id)
 	if err != nil {
@@ -185,9 +209,15 @@ func (d *Driver) Get(id, mountLabel string) (fs containerfs.ContainerFS, err err
 	}
 
 	layersToMount := []string{}
+	finalLayers := []string{}
 
 	if _, err := os.Stat(d.layerScratchPath(id)); err == nil {
 		// vhd exists, pass as=is to activatelayer
+		logrus.WithField("path", d.layerScratchPath(id)).Info("ActivateLayer")
+		if err := hcsshim.ActivateLayer(hcsshim.DriverInfo{}, d.layerDirPath(id)); err != nil {
+			return nil, errors.Wrap(err, "failed to ActivateLayer")
+		}
+		finalLayers = append(finalLayers, d.layerDirPath(id))
 	} else if os.IsNotExist(err) {
 		// no vhd, need to mount this layer as well
 		layersToMount = append(layersToMount, id)
@@ -198,6 +228,13 @@ func (d *Driver) Get(id, mountLabel string) (fs containerfs.ContainerFS, err err
 	layersToMount = append(layersToMount, layerChain...)
 
 	for _, layer := range layersToMount {
+		if mountPath, mounted, err := d.getCacheMount(layer); mounted {
+			finalLayers = append(finalLayers, mountPath)
+			continue
+		} else if err != nil {
+			return nil, errors.Wrap(err, "failed to check first layer mount cache")
+		}
+
 		g, err := hcsshim.NameToGuid(layer)
 		if err != nil {
 			return nil, errors.Wrap(err, "failed to convert name to GUID")
@@ -209,18 +246,81 @@ func (d *Driver) Get(id, mountLabel string) (fs containerfs.ContainerFS, err err
 		g2.Data3 = binary.LittleEndian.Uint16(g[6:8])
 		copy(g2.Data4[:], g[8:])
 
+		logrus.WithFields(logrus.Fields{
+			"layer": layer,
+			"guid":  g2.String(),
+		}).Info("Mounting CimFS layer")
+
 		if err := cimfs.MountImage(d.layerCimPath(layer), &g2); err != nil {
 			return nil, errors.Wrap(err, "failed to mount CimFS")
 		}
+
+		mountPath := fmt.Sprintf(`\\?\Volume{%s}\`, g2.String())
+
+		if err := d.setCacheMount(layer, mountPath); err != nil {
+			return nil, errors.Wrap(err, "failed to cache CimFS mount")
+		}
+
+		finalLayers = append(finalLayers, mountPath)
 	}
 
-	return nil, nil
+	logrus.WithField("finalLayers", finalLayers).Info("Final layers for PrepareLayer")
+
+	mountPath, err := hcsshim.GetLayerMountPath(hcsshim.DriverInfo{}, finalLayers[0])
+	if err != nil {
+		return nil, errors.Wrap(err, "failed to get first layer mount path")
+	}
+
+	logrus.WithField("mountPath", mountPath).Info("Retrieved mount path")
+
+	if err := hcsshim.PrepareLayer(hcsshim.DriverInfo{}, finalLayers[0], finalLayers[1:]); err != nil {
+		return nil, errors.Wrap(err, "failed to PrepareLayer")
+	}
+
+	if err := d.setCacheMount(id, mountPath); err != nil {
+		return nil, errors.Wrap(err, "failed to cache first layer mount")
+	}
+
+	return containerfs.NewLocalContainerFS(mountPath), nil
 }
 
 func (d *Driver) Put(id string) error {
 	logrus.WithFields(logrus.Fields{
 		"id": id,
 	}).Info("cimfs.Driver.Put")
+
+	if shouldUnmount, err := d.releaseCacheMount(id); !shouldUnmount {
+		return nil
+	} else if err != nil {
+		return errors.Wrap(err, "failed to release cached mount")
+	}
+
+	_, err := d.getLayerChain(id)
+	if err != nil {
+		return errors.Wrap(err, "failed to get layer chain")
+	}
+
+	// if err := hcsshim.UnprepareLayer()
+
+	// g, err := hcsshim.NameToGuid(id)
+	// if err != nil {
+	// 	return errors.Wrap(err, "failed to convert name to GUID")
+	// }
+
+	// g2 := guid.GUID{}
+	// g2.Data1 = binary.LittleEndian.Uint32(g[0:4])
+	// g2.Data2 = binary.LittleEndian.Uint16(g[4:6])
+	// g2.Data3 = binary.LittleEndian.Uint16(g[6:8])
+	// copy(g2.Data4[:], g[8:])
+
+	// logrus.WithFields(logrus.Fields{
+	// 	"layer": id,
+	// 	"guid":  g2.String(),
+	// }).Info("Unmounting CimFS layer")
+
+	// if err := cimfs.UnmountImage(&g2); err != nil {
+	// 	return errors.Wrap(err, "failed to unmount CimFS")
+	// }
 
 	return nil
 }
@@ -244,7 +344,10 @@ func (d *Driver) GetMetadata(id string) (map[string]string, error) {
 		"id": id,
 	}).Info("cimfs.Driver.GetMetadata")
 
-	panic("not implemented")
+	m := make(map[string]string)
+	m["dir"] = d.layerDirPath(id)
+
+	return m, nil
 }
 
 func (d *Driver) Cleanup() error {
@@ -275,40 +378,6 @@ func timeToFiletime(t time.Time) windows.Filetime {
 }
 
 const maxNanoSecondIntSize = 9
-
-func parsePAXTime(t string) (time.Time, error) {
-	buf := []byte(t)
-	pos := bytes.IndexByte(buf, '.')
-	var seconds, nanoseconds int64
-	var err error
-	if pos == -1 {
-		seconds, err = strconv.ParseInt(t, 10, 0)
-		if err != nil {
-			return time.Time{}, err
-		}
-	} else {
-		seconds, err = strconv.ParseInt(string(buf[:pos]), 10, 0)
-		if err != nil {
-			return time.Time{}, err
-		}
-		nano_buf := string(buf[pos+1:])
-		// Pad as needed before converting to a decimal.
-		// For example .030 -> .030000000 -> 30000000 nanoseconds
-		if len(nano_buf) < maxNanoSecondIntSize {
-			// Right pad
-			nano_buf += strings.Repeat("0", maxNanoSecondIntSize-len(nano_buf))
-		} else if len(nano_buf) > maxNanoSecondIntSize {
-			// Right truncate
-			nano_buf = nano_buf[:maxNanoSecondIntSize]
-		}
-		nanoseconds, err = strconv.ParseInt(string(nano_buf), 10, 0)
-		if err != nil {
-			return time.Time{}, err
-		}
-	}
-	ts := time.Unix(seconds, nanoseconds)
-	return ts, nil
-}
 
 func (d *Driver) ApplyDiff(id, parent string, diff io.Reader) (size int64, err error) {
 	logrus.WithFields(logrus.Fields{
