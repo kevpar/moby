@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"io/ioutil"
+	// "unsafe"
 	"os"
 	"path"
 	"path/filepath"
@@ -36,20 +37,12 @@ func init() {
 }
 
 func InitDriver(root string, options []string, uidMaps []idtools.IDMap, gidMaps []idtools.IDMap) (graphdriver.Driver, error) {
-	logrus.Info("cimfs.InitDriver")
-
-	layersRoot := filepath.Join(root, "layers")
-	if err := idtools.MkdirAllAndChown(layersRoot, 0700, idtools.Identity{UID: 0, GID: 0}); err != nil {
-		return nil, err
-	}
-	mountsRoot := filepath.Join(root, "mounts")
-	if err := idtools.MkdirAllAndChown(mountsRoot, 0700, idtools.Identity{UID: 0, GID: 0}); err != nil {
+	if err := idtools.MkdirAllAndChown(filepath.Join(root, "layers"), 0700, idtools.Identity{UID: 0, GID: 0}); err != nil {
 		return nil, err
 	}
 
 	return &Driver{
-		layersRoot: layersRoot,
-		mountsRoot: mountsRoot,
+		root: root,
 	}, nil
 }
 
@@ -59,8 +52,7 @@ type mountInfo struct {
 }
 
 type Driver struct {
-	layersRoot string
-	mountsRoot string
+	root string
 }
 
 func (d *Driver) String() string {
@@ -68,7 +60,7 @@ func (d *Driver) String() string {
 }
 
 func (d *Driver) layerDirPath(id string) string {
-	return filepath.Join(d.layersRoot, id)
+	return filepath.Join(d.root, "layer", id)
 }
 
 func (d *Driver) layerCimPath(id string) string {
@@ -141,6 +133,47 @@ func createVhdx(path string, sizeGB uint32) error {
 	}
 	logrus.WithField("path", path).Info("Successfully formatted VHD")
 
+	// if err := attachVirtualDisk(
+	// 	vhd,
+	// 	0,
+	// 	ATTACH_VIRTUAL_DISK_FLAG_NO_DRIVE_LETTER | ATTACH_VIRTUAL_DISK_FLAG_BYPASS_DEFAULT_ENCRYPTION_POLICY,
+	// 	0,
+	// 	&attachVirtualDiskParameters{Version: 2},
+	// 	0); err != nil {
+
+	// 	return errors.Wrap(err, "failed to attach VHD")
+	// }
+	// logrus.Info("Attached VHD")
+
+	// var buf *uint16
+	// if err := hcsGetLayerVhdMountPath(uintptr(vhd), &buf); err != nil {
+	// 	return errors.Wrap(err, "failed to get VHD mount path")
+	// }
+	// mountPath := windows.UTF16ToString((*[1 << 29]uint16)(unsafe.Pointer(buf))[:])
+	// logrus.WithField("mountPath", mountPath).Info("VHD mount path")
+
+	// b, err := winio.SddlToSecurityDescriptor("D:P(A;OICI;GA;;;SY)")
+	// if err != nil {
+	// 	return errors.Wrap(err, "failed to convert SDDL")
+	// }
+	// sa := windows.SecurityAttributes{
+	// 	Length: uint32(len(b)),
+	// 	SecurityDescriptor: uintptr(unsafe.Pointer(&b[0])),
+	// 	InheritHandle: 0,
+	// }
+	// sdp := filepath.Join(mountPath, "WcSandboxState")
+	// logrus.WithField("sdp", sdp).Info("Creating sandbox dir")
+	// sandboxDirPath, err := windows.UTF16PtrFromString(sdp)
+	// if err != nil {
+	// 	return errors.Wrap(err, "failed to convert sandbox dir path to UTF16")
+	// }
+	// if err := winio.RunWithPrivileges([]string{ "SeBackupPrivilege", "SeRestorePrivilege"}, func() error {
+	// 	return windows.CreateDirectory(sandboxDirPath, &sa)
+	// }); err != nil {
+
+	// 	return errors.Wrap(err, "failed to create sandbox dir")
+	// }
+
 	if err := windows.CloseHandle(windows.Handle(vhd)); err != nil {
 		return errors.Wrap(err, "failed to close VHD")
 	}
@@ -149,14 +182,6 @@ func createVhdx(path string, sizeGB uint32) error {
 }
 
 func (d *Driver) CreateReadWrite(id string, parent string, opts *graphdriver.CreateOpts) (err error) {
-	logrus.WithFields(logrus.Fields{
-		"id":     id,
-		"parent": parent,
-	}).Info("cimfs.Driver.CreateReadWrite")
-	defer func() {
-		logrus.WithField("error", err).Info("cimfs.Driver.CreateReadWrite end")
-	}()
-
 	if err := idtools.MkdirAllAndChown(d.layerDirPath(id), 0700, idtools.Identity{}); err != nil {
 		return errors.Wrap(err, "failed to create layer dir path")
 	}
@@ -169,11 +194,6 @@ func (d *Driver) CreateReadWrite(id string, parent string, opts *graphdriver.Cre
 }
 
 func (d *Driver) Create(id string, parent string, opts *graphdriver.CreateOpts) error {
-	logrus.WithFields(logrus.Fields{
-		"id":     id,
-		"parent": parent,
-	}).Info("cimfs.Driver.Create")
-
 	if err := idtools.MkdirAllAndChown(d.layerDirPath(id), 0700, idtools.Identity{}); err != nil {
 		return errors.Wrap(err, "failed to create layer dir path")
 	}
@@ -189,14 +209,6 @@ func (d *Driver) Remove(id string) error {
 }
 
 func (d *Driver) Get(id string, mountLabel string) (fs containerfs.ContainerFS, err error) {
-	logrus.WithFields(logrus.Fields{
-		"id":         id,
-		"mountLabel": mountLabel,
-	}).Info("cimfs.Driver.Get")
-	defer func() {
-		logrus.WithField("error", err).Info("cimfs.Driver.Get end")
-	}()
-
 	if mountPath, mounted, err := d.getCacheMount(id); mounted {
 		return containerfs.NewLocalContainerFS(mountPath), nil
 	} else if err != nil {
@@ -239,12 +251,7 @@ func (d *Driver) Get(id string, mountLabel string) (fs containerfs.ContainerFS, 
 		if err != nil {
 			return nil, errors.Wrap(err, "failed to convert name to GUID")
 		}
-
-		g2 := guid.GUID{}
-		g2.Data1 = binary.LittleEndian.Uint32(g[0:4])
-		g2.Data2 = binary.LittleEndian.Uint16(g[4:6])
-		g2.Data3 = binary.LittleEndian.Uint16(g[6:8])
-		copy(g2.Data4[:], g[8:])
+		g2 := guid.FromWindowsArray(g)
 
 		logrus.WithFields(logrus.Fields{
 			"layer": layer,
@@ -379,11 +386,78 @@ func timeToFiletime(t time.Time) windows.Filetime {
 
 const maxNanoSecondIntSize = 9
 
+func fileInfoFromTar(h *tar.Header) (_ *cimfs.FileInfo, err error) {
+	creationTime := time.Unix(0, 0)
+	if creationTimeStr, ok := h.PAXRecords["LIBARCHIVE.creationtime"]; ok {
+		creationTime, err = parsePAXTime(creationTimeStr)
+		if err != nil {
+			return nil, errors.Wrap(err, "failed to parse creation time")
+		}
+	}
+
+	attrs := uint64(0)
+	if attrsStr, ok := h.PAXRecords["MSWINDOWS.fileattr"]; ok {
+		attrs, err = strconv.ParseUint(attrsStr, 10, 32)
+		if err != nil {
+			return nil, errors.Wrap(err, "failed to parse attributes")
+		}
+	} else {
+		if h.Typeflag == tar.TypeDir {
+			attrs |= windows.FILE_ATTRIBUTE_DIRECTORY
+		}
+	}
+
+	sd := []byte{}
+	if sdStr, ok := h.PAXRecords["MSWINDOWS.rawsd"]; ok {
+		sd, err = base64.StdEncoding.DecodeString(sdStr)
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse security descriptor %q", sdStr)
+		}
+	}
+
+	xattrPrefix := "MSWINDOWS.xattr."
+	var eas []winio.ExtendedAttribute
+	for k, v := range h.PAXRecords {
+		if !strings.HasPrefix(k, xattrPrefix) {
+			continue
+		}
+		data, err := base64.StdEncoding.DecodeString(v)
+		if err != nil {
+			return nil, fmt.Errorf("failed to decode content for EA %s (%s)", k, v)
+		}
+		eas = append(eas, winio.ExtendedAttribute{
+			Name:  k[len(xattrPrefix):],
+			Value: data,
+		})
+	}
+
+	return &cimfs.FileInfo{
+		Size:               h.Size,
+		CreationTime:       timeToFiletime(creationTime),
+		LastWriteTime:      timeToFiletime(h.ModTime),
+		ChangeTime:         timeToFiletime(h.ChangeTime),
+		LastAccessTime:     timeToFiletime(h.AccessTime),
+		Attributes:         uint32(attrs),
+		SecurityDescriptor: sd,
+		EAs:                eas,
+	}, nil
+}
+
 func (d *Driver) ApplyDiff(id, parent string, diff io.Reader) (size int64, err error) {
 	logrus.WithFields(logrus.Fields{
 		"id":     id,
 		"parent": parent,
 	}).Info("cimfs.Driver.ApplyDiff")
+
+	hives := map[string]string{
+		"SYSTEM":   "SYSTEM_BASE",
+		"SOFTWARE": "SOFTWARE_BASE",
+		"SAM":      "SAM_BASE",
+		"SECURITY": "SECURITY_BASE",
+		"DEFAULT":  "DEFAULTUSER_BASE",
+	}
+	hivesPath := filepath.Join("Files", "Windows", "System32", "Config")
+	seenHives := make(map[string]bool)
 
 	cimFSPath := d.layerCimPath(id)
 
@@ -404,66 +478,19 @@ func (d *Driver) ApplyDiff(id, parent string, diff io.Reader) (size int64, err e
 		} else {
 			// if link: err = w.AddLink(filepath.FromSlash(hdr.Name), filepath.FromSlash(hdr.Linkname))
 
+			info, err := fileInfoFromTar(h)
+			if err != nil {
+				return 0, err
+			}
+
 			newPath := filepath.FromSlash(h.Name)
-			logrus.Debug("CimFS ApplyDiff: found item: ", newPath)
 
-			creationTime := time.Unix(0, 0)
-			if creationTimeStr, ok := h.PAXRecords["LIBARCHIVE.creationtime"]; ok {
-				creationTime, err = parsePAXTime(creationTimeStr)
-				if err != nil {
-					return 0, errors.Wrap(err, "failed to parse creation time")
+			for k := range hives {
+				if strings.ToLower(newPath) == strings.ToLower(filepath.Join(hivesPath, k)) {
+					seenHives[k] = true
 				}
 			}
 
-			attrs := uint64(0)
-			if attrsStr, ok := h.PAXRecords["MSWINDOWS.fileattr"]; ok {
-				attrs, err = strconv.ParseUint(attrsStr, 10, 32)
-				if err != nil {
-					return 0, errors.Wrap(err, "failed to parse attributes")
-				}
-			} else {
-				if h.Typeflag == tar.TypeDir {
-					attrs |= windows.FILE_ATTRIBUTE_DIRECTORY
-				}
-			}
-
-			// TODO: need support for SDDL extension?
-			sd := []byte{}
-			if sdStr, ok := h.PAXRecords["MSWINDOWS.rawsd"]; ok {
-				sd, err = base64.StdEncoding.DecodeString(sdStr)
-				if err != nil {
-					return 0, errors.Wrap(err, "failed to parse security descriptor")
-				}
-			}
-
-			xattrPrefix := "MSWINDOWS.xattr."
-			var eas []winio.ExtendedAttribute
-			for k, v := range h.PAXRecords {
-				if !strings.HasPrefix(k, xattrPrefix) {
-					continue
-				}
-				data, err := base64.StdEncoding.DecodeString(v)
-				if err != nil {
-					return 0, errors.Wrap(err, "failed to parse extended attribute")
-				}
-				eas = append(eas, winio.ExtendedAttribute{
-					Name:  k[len(xattrPrefix):],
-					Value: data,
-				})
-			}
-
-			info := &cimfs.FileInfo{
-				Size:               h.Size,
-				CreationTime:       timeToFiletime(creationTime),
-				LastWriteTime:      timeToFiletime(h.ModTime),
-				ChangeTime:         timeToFiletime(h.ChangeTime),
-				LastAccessTime:     timeToFiletime(h.AccessTime),
-				Attributes:         uint32(attrs),
-				SecurityDescriptor: sd,
-				EAs:                eas,
-			}
-
-			logrus.WithField("FileInfo", info).Debugf("Adding file to CimFS layer")
 			if err := cim.AddFile(newPath, info); err != nil {
 				return 0, errors.Wrap(err, "failed to add new CimFS file")
 			}
@@ -480,10 +507,41 @@ func (d *Driver) ApplyDiff(id, parent string, diff io.Reader) (size int64, err e
 		h, err = tr.Next()
 	}
 
-	// TODO: need to restore dir file times?
-
 	if err != io.EOF {
 		return 0, errors.Wrap(err, "failed iterating tar entries")
+	}
+
+	content := "vhd-with-hives\n"
+	info := &cimfs.FileInfo{
+		Size: int64(len(content)),
+	}
+	if err := cim.AddFile("layout", info); err != nil {
+		return 0, errors.Wrap(err, "failed to create layout file")
+	}
+	if _, err := io.WriteString(cim, content); err != nil {
+		return 0, errors.Wrap(err, "failed to write layout file")
+	}
+	if err := cim.CloseStream(); err != nil {
+		return 0, errors.Wrap(err, "failed to close layout file stream")
+	}
+
+	if err := cim.AddFile("Hives", &cimfs.FileInfo{Attributes: uint32(windows.FILE_ATTRIBUTE_DIRECTORY)}); err != nil {
+		return 0, errors.Wrap(err, "failed to create Hives dir")
+	}
+	if err := cim.CloseStream(); err != nil {
+		return 0, errors.Wrap(err, "failed to close Hives dir stream")
+	}
+
+	for k := range seenHives {
+		existingPath := filepath.Join(hivesPath, k)
+		targetPath := filepath.Join("Hives", hives[k])
+		logrus.WithFields(logrus.Fields{
+			"existingPath": existingPath,
+			"targetPath":   targetPath,
+		}).Info("Creating hive link")
+		if err := cim.AddLink(targetPath, existingPath); err != nil {
+			return 0, errors.Wrap(err, "failed to create hive link")
+		}
 	}
 
 	return 0, cim.Close(cimFSPath)

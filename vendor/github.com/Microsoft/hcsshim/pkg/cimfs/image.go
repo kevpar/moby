@@ -46,7 +46,7 @@ type fileInfoInternal struct {
 }
 
 type eaInternal struct {
-	Name       string
+	Name       unsafe.Pointer
 	NameLength uint32
 
 	Flags uint8
@@ -94,8 +94,12 @@ func (cim *Image) AddFile(path string, info *FileInfo) error {
 
 	easInternal := []eaInternal{}
 	for _, ea := range info.EAs {
+		nameBytes, err := windows.BytePtrFromString(ea.Name)
+		if err != nil {
+			return errors.Wrap(err, "failed to convert EA name to bytes")
+		}
 		eaInternal := eaInternal{
-			Name:       ea.Name,
+			Name:       unsafe.Pointer(nameBytes),
 			NameLength: uint32(len(ea.Name)),
 			Flags:      ea.Flags,
 		}
@@ -107,6 +111,10 @@ func (cim *Image) AddFile(path string, info *FileInfo) error {
 
 		easInternal = append(easInternal, eaInternal)
 	}
+	if len(easInternal) > 0 {
+		infoInternal.EAs = unsafe.Pointer(&easInternal[0])
+		infoInternal.EACount = uint32(len(easInternal))
+	}
 
 	return cimAddFile(cim.handle, path, infoInternal, 0, &cim.activeStream)
 }
@@ -117,7 +125,7 @@ func (cim *Image) Write(p []byte) (int, error) {
 	}
 
 	// TODO: pass p directly to gen'd syscall
-	err := cimWriteStream(cim.activeStream, uintptr(unsafe.Pointer(&p[0])), uint64(len(p)))
+	err := cimWriteStream(cim.activeStream, uintptr(unsafe.Pointer(&p[0])), uint32(len(p)))
 	if err != nil {
 		return 0, err
 	}
@@ -135,6 +143,10 @@ func (cim *Image) Close(path string) error {
 
 func (cim *Image) RemoveFile(path string) error {
 	return cimRemoveFile(cim.handle, path)
+}
+
+func (cim *Image) AddLink(oldname string, newname string) error {
+	return cimAddLink(cim.handle, oldname, newname)
 }
 
 func MountImage(path string, g *guid.GUID) error {

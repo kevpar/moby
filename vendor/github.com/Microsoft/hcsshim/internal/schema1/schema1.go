@@ -63,7 +63,7 @@ type MappedVirtualDisk struct {
 	CreateInUtilityVM bool   `json:",omitempty"`
 	ReadOnly          bool   `json:",omitempty"`
 	Cache             string `json:",omitempty"` // "" (Unspecified); "Disabled"; "Enabled"; "Private"; "PrivateAllowSharing"
-	AttachOnly        bool   `json:",omitempty:`
+	AttachOnly        bool   `json:",omitempty"`
 }
 
 // AssignedDevice represents a device that has been directly assigned to a container
@@ -134,9 +134,10 @@ type ContainerProperties struct {
 	State                        string
 	Name                         string
 	SystemType                   string
+	RuntimeOSType                string `json:"RuntimeOsType,omitempty"`
 	Owner                        string
 	SiloGUID                     string                              `json:"SiloGuid,omitempty"`
-	RuntimeID                    *guid.GUID                          `json:"RuntimeId,omitempty"`
+	RuntimeID                    guid.GUID                           `json:"RuntimeId,omitempty"`
 	IsRuntimeTemplate            bool                                `json:",omitempty"`
 	RuntimeImagePath             string                              `json:",omitempty"`
 	Stopped                      bool                                `json:",omitempty"`

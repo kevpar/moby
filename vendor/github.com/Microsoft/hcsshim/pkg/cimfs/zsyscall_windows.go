@@ -47,6 +47,7 @@ var (
 	procCimFinalizeStream  = modcimfs.NewProc("CimFinalizeStream")
 	procCimWriteStream     = modcimfs.NewProc("CimWriteStream")
 	procCimRemoveFile      = modcimfs.NewProc("CimRemoveFile")
+	procCimAddLink         = modcimfs.NewProc("CimAddLink")
 )
 
 func cimMountImage(cimPath string, volumeID *g) (hr error) {
@@ -151,7 +152,7 @@ func cimFinalizeStream(cimStreamHandle streamHandle) (hr error) {
 	return
 }
 
-func cimWriteStream(cimStreamHandle streamHandle, buffer uintptr, bufferSize uint64) (hr error) {
+func cimWriteStream(cimStreamHandle streamHandle, buffer uintptr, bufferSize uint32) (hr error) {
 	r0, _, _ := syscall.Syscall(procCimWriteStream.Addr(), 3, uintptr(cimStreamHandle), uintptr(buffer), uintptr(bufferSize))
 	if int32(r0) < 0 {
 		if r0&0x1fff0000 == 0x00070000 {
@@ -173,6 +174,31 @@ func cimRemoveFile(cimFSHandle imageHandle, path string) (hr error) {
 
 func _cimRemoveFile(cimFSHandle imageHandle, path *uint16) (hr error) {
 	r0, _, _ := syscall.Syscall(procCimRemoveFile.Addr(), 2, uintptr(cimFSHandle), uintptr(unsafe.Pointer(path)), 0)
+	if int32(r0) < 0 {
+		if r0&0x1fff0000 == 0x00070000 {
+			r0 &= 0xffff
+		}
+		hr = syscall.Errno(r0)
+	}
+	return
+}
+
+func cimAddLink(cimFSHandle imageHandle, existingPath string, targetPath string) (hr error) {
+	var _p0 *uint16
+	_p0, hr = syscall.UTF16PtrFromString(existingPath)
+	if hr != nil {
+		return
+	}
+	var _p1 *uint16
+	_p1, hr = syscall.UTF16PtrFromString(targetPath)
+	if hr != nil {
+		return
+	}
+	return _cimAddLink(cimFSHandle, _p0, _p1)
+}
+
+func _cimAddLink(cimFSHandle imageHandle, existingPath *uint16, targetPath *uint16) (hr error) {
+	r0, _, _ := syscall.Syscall(procCimAddLink.Addr(), 3, uintptr(cimFSHandle), uintptr(unsafe.Pointer(existingPath)), uintptr(unsafe.Pointer(targetPath)))
 	if int32(r0) < 0 {
 		if r0&0x1fff0000 == 0x00070000 {
 			r0 &= 0xffff

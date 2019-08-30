@@ -38,14 +38,37 @@ func errnoErr(e syscall.Errno) error {
 
 var (
 	modcomputestorage = windows.NewLazySystemDLL("computestorage.dll")
+	modVirtDisk       = windows.NewLazySystemDLL("VirtDisk.dll")
 
 	procHcsFormatWritableLayerVhd = modcomputestorage.NewProc("HcsFormatWritableLayerVhd")
+	procHcsGetLayerVhdMountPath   = modcomputestorage.NewProc("HcsGetLayerVhdMountPath")
+	procAttachVirtualDisk         = modVirtDisk.NewProc("AttachVirtualDisk")
 )
 
 func hcsFormatWritableLayerVhd(handle uintptr) (hr error) {
 	r0, _, _ := syscall.Syscall(procHcsFormatWritableLayerVhd.Addr(), 1, uintptr(handle), 0, 0)
 	if r0 != 0 {
 		hr = syscall.Errno(r0)
+	}
+	return
+}
+
+func hcsGetLayerVhdMountPath(handle uintptr, mountPath **uint16) (hr error) {
+	r0, _, _ := syscall.Syscall(procHcsGetLayerVhdMountPath.Addr(), 2, uintptr(handle), uintptr(unsafe.Pointer(mountPath)), 0)
+	if r0 != 0 {
+		hr = syscall.Errno(r0)
+	}
+	return
+}
+
+func attachVirtualDisk(handle syscall.Handle, secDesc uintptr, flags uint32, providerFlags uint32, parameters *attachVirtualDiskParameters, overlapped uintptr) (err error) {
+	r1, _, e1 := syscall.Syscall6(procAttachVirtualDisk.Addr(), 6, uintptr(handle), uintptr(secDesc), uintptr(flags), uintptr(providerFlags), uintptr(unsafe.Pointer(parameters)), uintptr(overlapped))
+	if r1 != 0 {
+		if e1 != 0 {
+			err = errnoErr(e1)
+		} else {
+			err = syscall.EINVAL
+		}
 	}
 	return
 }

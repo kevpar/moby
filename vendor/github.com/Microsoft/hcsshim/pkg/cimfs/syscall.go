@@ -8,10 +8,6 @@ type g = guid.GUID
 
 //go:generate go run ../../mksyscall_windows.go -output zsyscall_windows.go syscall.go
 
-// CimAddStream
-// CimAddLink
-// CimRemoveFile
-
 //sys cimMountImage(cimPath string, volumeID *g) (hr error) = cimfs.CimMountImage
 //sys cimUnmountImage(volumeID *g) (hr error) = cimfs.CimUnmountImage
 
@@ -20,5 +16,6 @@ type g = guid.GUID
 
 //sys cimAddFile(cimFSHandle imageHandle, path string, file *fileInfoInternal, flags uint32, cimStreamHandle *streamHandle) (hr error) = cimfs.CimAddFile
 //sys cimFinalizeStream(cimStreamHandle streamHandle) (hr error) = cimfs.CimFinalizeStream
-//sys cimWriteStream(cimStreamHandle streamHandle, buffer uintptr, bufferSize uint64) (hr error) = cimfs.CimWriteStream
+//sys cimWriteStream(cimStreamHandle streamHandle, buffer uintptr, bufferSize uint32) (hr error) = cimfs.CimWriteStream
 //sys cimRemoveFile(cimFSHandle imageHandle, path string) (hr error) = cimfs.CimRemoveFile
+//sys cimAddLink(cimFSHandle imageHandle, existingPath string, targetPath string) (hr error) = cimfs.CimAddLink
